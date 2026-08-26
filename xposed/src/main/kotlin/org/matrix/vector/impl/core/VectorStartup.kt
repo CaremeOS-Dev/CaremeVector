@@ -16,6 +16,18 @@ import org.matrix.vector.impl.hooks.VectorHookBuilder
  */
 object VectorStartup {
 
+    // CAREME-DBG: temporary instrumentation
+    @JvmStatic
+    fun vdbg(msg: String) {
+        try {
+            java.io.FileWriter("/data/local/tmp/vdbg.txt", true).use {
+                it.write("[vstartup ${android.os.Process.myPid()}] $msg\n")
+            }
+        } catch (t: Throwable) {
+            // never let logging break injection
+        }
+    }
+
     @JvmStatic
     fun init(
         isSystem: Boolean,
@@ -23,8 +35,11 @@ object VectorStartup {
         appDir: String?,
         service: IFrameworkService?,
     ) {
+        vdbg("VectorStartup.init: VectorServiceClient.init")
         VectorServiceClient.init(service, processName ?: "android")
+        vdbg("VectorStartup.init: deoptBootMethods")
         VectorDeopter.deoptBootMethods()
+        vdbg("VectorStartup.init: done")
     }
 
     /**
@@ -41,6 +56,7 @@ object VectorStartup {
 
     @JvmStatic
     fun bootstrap(isSystem: Boolean, systemServerStarted: Boolean) {
+        vdbg("bootstrap: dispatchUncaughtException hook")
         // Crash Dump Interceptor
         Thread::class
             .java
@@ -50,6 +66,7 @@ object VectorStartup {
 
         // Process-specific Interceptors
         if (isSystem) {
+            vdbg("bootstrap: handleSystemServerProcess hook")
             val zygoteInitClass = Class.forName("com.android.internal.os.ZygoteInit")
             zygoteInitClass.declaredMethods
                 .filter { it.name == "handleSystemServerProcess" }
@@ -67,6 +84,7 @@ object VectorStartup {
         }
 
         // Application Load Interceptors
+        vdbg("bootstrap: LoadedApk ctor hooks")
         val loadedApkClass = Class.forName("android.app.LoadedApk")
         loadedApkClass.declaredConstructors.forEach {
             // Hook all constructors of LoadedApk to catch early instantiations securely
@@ -84,6 +102,7 @@ object VectorStartup {
             .forEach { VectorHookBuilder(it).intercept(LoadedApkCreateCLHooker) }
 
         // ActivityThread Attachment Interceptor
+        vdbg("bootstrap: ActivityThread.attach hook")
         val activityThreadClass = Class.forName("android.app.ActivityThread")
         activityThreadClass.declaredMethods
             .filter { it.name == "attach" }
@@ -122,5 +141,6 @@ object VectorStartup {
                 }
             }
         }
+        vdbg("bootstrap: done")
     }
 }

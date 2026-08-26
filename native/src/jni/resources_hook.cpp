@@ -1,10 +1,14 @@
 #include <dex_builder.h>
+#include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 
 #include "common/config.h"
@@ -217,10 +221,52 @@ jobject BuildDummySuperClassLoader(JNIEnv *env, jobject parent, const char *res_
     // Finalize the DEX file into a memory buffer.
     slicer::MemView image{dex_file.CreateImage()};
 
-    // Wrap the memory buffer in a Java ByteBuffer.
-    auto dex_buffer = lsplant::JNI_NewDirectByteBuffer(env, const_cast<void *>(image.ptr()),
-                                                       image.size());
-    if (!dex_buffer) return nullptr;
+    // CAREME: back the ByteBuffer with a persistent copy. CreateImage()'s bytes live in dex_file's
+    // allocator, which is freed when this function returns — but the caller only calls loadClass()
+    // AFTER we return. CaremeOS's ART keeps referencing the DirectByteBuffer's memory rather than
+    // copying it into a MemMap at construction, so the first loadClass() then reads freed memory
+    // and the class appears missing ("cookie valid but class not found"). Leak a heap copy: the
+    // dummy classloader is a process-lifetime singleton, so this is a one-time, bounded leak.
+    const size_t dex_size = image.size();
+    void *persistent = malloc(dex_size);
+    if (!persistent) {
+        LOGE("BuildDummySuperClassLoader: OOM allocating {} bytes for dummy dex", dex_size);
+        return nullptr;
+    }
+    memcpy(persistent, image.ptr(), dex_size);
+    // CAREME-DBG: dump + verify. Read file_size at offset 0x20 and map_off at 0x34; if the dex's
+    // declared size is smaller than CreateImage()'s returned length, the buffer was corrupted.
+    uint32_t declared_size = 0, map_off = 0, map_entries = 0;
+    if (dex_size >= 0x38) {
+        const auto *b = static_cast<const uint8_t *>(image.ptr());
+        declared_size = *reinterpret_cast<const uint32_t *>(b + 0x20);
+        map_off = *reinterpret_cast<const uint32_t *>(b + 0x34);
+        if (map_off && map_off + 4 <= dex_size)
+            map_entries = *reinterpret_cast<const uint32_t *>(b + map_off);
+    }
+    LOGD("dummy dex: image.size={} declared_file_size={} map_off={} map_entries={}", dex_size,
+         declared_size, map_off, map_entries);
+    // CAREME-DBG: dump the in-memory dummy dex to compare against the file-based dex offline — this
+    // tells us whether the define-time failure is dex-content or loader-type. Per-pid path so
+    // concurrent processes don't clobber it.
+    {
+        // system_server is uid 1000 and the path is pre-created 0666 by root, so this is the one
+        // process guaranteed able to write the dump for offline diffing.
+        if (getuid() == 1000) {
+            const char *dpath = "/data/local/tmp/dummy.dex";
+            if (int dfd = open(dpath, O_WRONLY | O_CREAT | O_TRUNC, 0666); dfd >= 0) {
+                if (write(dfd, image.ptr(), dex_size) != (ssize_t)dex_size) LOGW("dummy dex short write");
+                close(dfd);
+            }
+        }
+    }
+
+    // Wrap the persistent buffer in a Java ByteBuffer.
+    auto dex_buffer = lsplant::JNI_NewDirectByteBuffer(env, persistent, dex_size);
+    if (!dex_buffer) {
+        free(persistent);
+        return nullptr;
+    }
 
     // Create and return a new InMemoryDexClassLoader instance. Released from its scope because it
     // is handed straight back to the caller.
@@ -233,6 +279,40 @@ VECTOR_DEF_NATIVE_METHOD(jobject, ResourcesHook, buildDummyClassLoader, jobject 
     return BuildDummySuperClassLoader(env, parent,
                                       lsplant::JUTFString(env, resource_super_class).get(),
                                       lsplant::JUTFString(env, typed_array_super_class).get());
+}
+
+// CAREME: write the dummy-superclass dex to a real file. In-memory dex on this ART 8.1 cannot
+// define a class whose superclass is a *concrete* framework class (XResourcesSuperClass extends
+// android.content.res.Resources, XTypedArraySuperClass extends TypedArray) — define-time resolution
+// fails and takes down the process. A file-backed dex loaded via DexClassLoader is the classic
+// Xposed path that does work. Returns true on success.
+VECTOR_DEF_NATIVE_METHOD(jboolean, ResourcesHook, writeDummyDex, jstring path,
+                         jstring resource_super_class, jstring typed_array_super_class) {
+    using namespace startop::dex;
+    DexBuilder dex_file;
+    ClassBuilder{dex_file.MakeClass("xposed/dummy/XResourcesSuperClass")}
+        .setSuperClass(TypeDescriptor::FromClassname(lsplant::JUTFString(env, resource_super_class).get()));
+    ClassBuilder{dex_file.MakeClass("xposed/dummy/XTypedArraySuperClass")}
+        .setSuperClass(TypeDescriptor::FromClassname(lsplant::JUTFString(env, typed_array_super_class).get()));
+    slicer::MemView image{dex_file.CreateImage()};
+    lsplant::JUTFString p(env, path);
+    // Write to a private temp then rename into place so concurrent processes never read a
+    // half-written dex.
+    std::string tmp = std::string(p.get()) + ".tmp";
+    int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        PLOGE("writeDummyDex: open {}", tmp);
+        return JNI_FALSE;
+    }
+    bool ok = write(fd, image.ptr(), image.size()) == (ssize_t)image.size();
+    close(fd);
+    chmod(tmp.c_str(), 0644);  // world-readable so the process can dex-load it
+    if (ok && rename(tmp.c_str(), p.get()) != 0) {
+        PLOGE("writeDummyDex: rename {} -> {}", tmp, p.get());
+        ok = false;
+    }
+    LOGD("writeDummyDex: wrote {} bytes to {} ok={}", image.size(), p.get(), ok);
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 /**
@@ -483,6 +563,8 @@ static JNINativeMethod gMethods[] = {
     VECTOR_NATIVE_METHOD(ResourcesHook, buildDummyClassLoader,
                          "(Ljava/lang/ClassLoader;Ljava/lang/String;Ljava/lang/"
                          "String;)Ljava/lang/ClassLoader;"),
+    VECTOR_NATIVE_METHOD(ResourcesHook, writeDummyDex,
+                         "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Z"),
     VECTOR_NATIVE_METHOD(ResourcesHook, rewriteXmlReferencesNative,
                          "(JLjava/lang/Object;Landroid/content/res/Resources;)V")};
 

@@ -54,6 +54,16 @@ public final class XposedInit {
             return;
         }
 
+        // CAREME: deferred resource-hook bootstrap. initXResources touches
+        // Resources.getSystem(); doing it here (first actual resource-hook use) instead of
+        // eagerly during injection avoids CaremeOS's in-place idmap exec at fork time.
+        // The idmap exec itself is blocked natively in system_server (execve hook in module.cpp),
+        // which makes AssetManager's idmap path fail gracefully instead of replacing the process.
+        XposedBridge.initXResources();
+        if (disableResources) {
+            return;
+        }
+
         VectorDeopter.deoptResourceMethods();
 
         if (!ResourcesHook.initXResourcesNative()) {

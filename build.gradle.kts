@@ -271,7 +271,7 @@ subprojects {
 
             defaultConfig.apply {
                 minSdk = androidMinSdkVersion
-                ndk { abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")) }
+                ndk { abiFilters.addAll(listOf("armeabi-v7a")) } // CAREME: 32-bit only device
 
                 if (this is ApplicationDefaultConfig) {
                     targetSdk = androidTargetSdkVersion
@@ -283,7 +283,7 @@ subprojects {
                 val flags =
                     listOf(
                         "-DVERSION_CODE=${versionCodeProvider.get()}",
-                        "-DVERSION_NAME='\"${versionNameProvider.get()}\"'",
+                        "-DVERSION_NAME=${versionNameProvider.get()}",
                         // parallel_hashmap reaches for <emmintrin.h> whenever __SSE2__ is defined,
                         // and that header's static inline intrinsics arrive twice on the x86 ABIs:
                         // dex_builder.ixx and dex_helper.ixx each include phmap in their global

@@ -2,6 +2,7 @@ package org.matrix.vector.daemon.data
 
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageParser
+import android.os.Build
 import android.system.Os
 import android.util.Log
 import hidden.HiddenApiBridge
@@ -291,7 +292,14 @@ object ConfigCache {
                   // its own authentication in `ModuleAppService.ensureModule` against a caller's
                   // 10136 and never be sent its binder.
                   appId = appInfo.uid % PER_USER_RANGE
-                  versionCode = pkgInfo.longVersionCode
+                  // CAREME: PackageInfo.getLongVersionCode() is API 28+. On SDK 27 (Android 8.1)
+                  // the accessor is absent and the call throws NoSuchMethodError, which took out
+                  // the daemon's binder thread on the first module scan and made the manager
+                  // report "Vector not loaded". Fall back to the deprecated int field below 28,
+                  // mirroring the manager's PackageInfo.versionCodeCompat.
+                  versionCode =
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pkgInfo.longVersionCode
+                    else @Suppress("DEPRECATION") pkgInfo.versionCode.toLong()
                   applicationInfo = appInfo
                   service = oldModule?.service ?: InjectedModuleService(pkgName)
                   code = loaded.apk

@@ -62,20 +62,42 @@ public final class XposedBridge {
 
     public static volatile ClassLoader dummyClassLoader = null;
 
+    // CAREME-DBG: temporary instrumentation
+    private static void vdbg(String msg) {
+        try {
+            java.io.FileWriter w = new java.io.FileWriter("/data/local/tmp/vdbg.txt", true);
+            w.write("[xres " + android.os.Process.myPid() + "] " + msg + "\n");
+            w.close();
+        } catch (Throwable t) {
+            // never let logging break injection
+        }
+    }
+
     public static void initXResources() {
+        vdbg("initXResources enter");
         if (dummyClassLoader != null) {
             return;
         }
+        // CAREME-DBG: toggle to skip resource hooks entirely
+        if (new java.io.File("/data/local/tmp/vector_skipres").exists()) {
+            vdbg("initXResources SKIPPED via toggle");
+            XposedInit.disableResources = true;
+            return;
+        }
         try {
+            vdbg("initXResources: Resources.getSystem");
             Resources res = Resources.getSystem();
+            vdbg("initXResources: getSystem ok -> getClass");
             Class<?> resClass = res.getClass();
             Class<?> taClass = TypedArray.class;
             try {
                 try {
+                    vdbg("initXResources: obtainTypedArray(preloaded_drawables)");
                     TypedArray ta = res.obtainTypedArray(res.getIdentifier(
                             "preloaded_drawables", "array", "android"));
                     taClass = ta.getClass();
                     ta.recycle();
+                    vdbg("initXResources: obtainTypedArray ok");
                 } catch (NullPointerException npe) {
                     // For ZUI devices, the creation of TypedArray needs to check the configuration
                     // from ActivityThread.currentActivityThread. However, we do not have a valid
@@ -96,15 +118,72 @@ public final class XposedBridge {
             } catch (Resources.NotFoundException nfe) {
                 XposedBridge.log(nfe);
             }
+            vdbg("initXResources: makeInheritable x2");
             ResourcesHook.makeInheritable(resClass);
             ResourcesHook.makeInheritable(taClass);
             ClassLoader myCL = XposedBridge.class.getClassLoader();
             assert myCL != null;
-            dummyClassLoader = ResourcesHook.buildDummyClassLoader(myCL.getParent(), resClass.getName(), taClass.getName());
-            dummyClassLoader.loadClass("xposed.dummy.XResourcesSuperClass");
-            dummyClassLoader.loadClass("xposed.dummy.XTypedArraySuperClass");
+            vdbg("initXResources: resClass=" + resClass.getName() + " taClass=" + taClass.getName()
+                    + " myCL=" + myCL.getClass().getName() + "@" + System.identityHashCode(myCL)
+                    + " parent=" + (myCL.getParent() == null ? "null" : myCL.getParent().getClass().getName())
+                    + " isSystem=" + (android.os.Process.myUid() == 1000));
+
+            // CAREME: in-memory dex cannot define a class that extends a *concrete* framework class
+            // on this ART 8.1 (define-time superclass resolution fails and takes the process down).
+            // A file-backed dex loaded via DexClassLoader is the proven-working path (verified:
+            // DexClassLoader loads XResourcesSuperClass fine). The dex bytes are identical for every
+            // process (they only encode the superclass names), so system_server (uid 1000) writes
+            // them once to a world-readable path; every other process just dex-loads it read-only.
+            java.io.File stageDir = new java.io.File("/data/system/vector");
+            java.io.File dexFile = new java.io.File(stageDir, "xposed_dummy.dex");
+            if (android.os.Process.myUid() == 1000) {
+                stageDir.mkdirs();
+                stageDir.setReadable(true, false);
+                stageDir.setExecutable(true, false);
+                boolean wrote = ResourcesHook.writeDummyDex(dexFile.getAbsolutePath(), resClass.getName(), taClass.getName());
+                dexFile.setReadable(true, false);
+                vdbg("initXResources: system wrote dummy dex -> " + wrote + " exists=" + dexFile.exists());
+            }
+            if (dexFile.exists()) {
+                try {
+                    vdbg("initXResources: DexClassLoader(file) " + dexFile);
+                    dummyClassLoader = new dalvik.system.DexClassLoader(
+                            dexFile.getAbsolutePath(), stageDir.getAbsolutePath(), null, myCL.getParent());
+                    dummyClassLoader.loadClass("xposed.dummy.XResourcesSuperClass");
+                    dummyClassLoader.loadClass("xposed.dummy.XTypedArraySuperClass");
+                    vdbg("initXResources: file dex OK");
+                } catch (Throwable t) {
+                    vdbg("initXResources: file dex failed, falling back to in-memory: " + t);
+                    dummyClassLoader = null;
+                }
+            }
+            if (dummyClassLoader == null) {
+                vdbg("initXResources: buildDummyClassLoader (in-memory fallback)");
+                dummyClassLoader = ResourcesHook.buildDummyClassLoader(myCL.getParent(), resClass.getName(), taClass.getName());
+                dummyClassLoader.loadClass("xposed.dummy.XResourcesSuperClass");
+                dummyClassLoader.loadClass("xposed.dummy.XTypedArraySuperClass");
+            }
+            vdbg("initXResources: setObjectField parent");
             XposedHelpers.setObjectField(myCL, "parent", dummyClassLoader);
+            // CAREME-DBG: after wiring dummyClassLoader as myCL's parent, test whether myCL can now
+            // resolve both the dummy superclass and XResources through it. This tells us whether the
+            // later 'XResources not found' is a delegation problem (ART not searching the parent at
+            // define-time) vs. a dex/linkage problem.
+            try {
+                vdbg("initXResources: myCL.loadClass(super) -> "
+                        + myCL.loadClass("xposed.dummy.XResourcesSuperClass"));
+            } catch (Throwable t) {
+                vdbg("initXResources: myCL.loadClass(super) threw: " + t);
+            }
+            try {
+                vdbg("initXResources: myCL.loadClass(XResources) -> "
+                        + myCL.loadClass("android.content.res.XResources"));
+            } catch (Throwable t) {
+                vdbg("initXResources: myCL.loadClass(XResources) threw: " + t);
+            }
+            vdbg("initXResources: done");
         } catch (Throwable throwable) {
+            vdbg("initXResources threw: " + throwable);
             XposedBridge.log(throwable);
             XposedInit.disableResources = true;
         }

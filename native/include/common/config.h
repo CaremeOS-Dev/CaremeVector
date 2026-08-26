@@ -30,6 +30,12 @@ inline constexpr bool kIsDebugBuild = IsDebugBuild();
 #define LP_SELECT(lp32, lp64) lp32
 #endif
 
+// Stringify a -D macro value regardless of whether the build system's quoting survived.
+// The Gradle -> CMake -> ninja -> cmd pipeline on Windows strips embedded quotes, so a
+// plain `const char* s = VERSION_NAME;` sees a bare token (2.2) instead of "2.2".
+#define VECTOR_STR_(x) #x
+#define VECTOR_STR(x) VECTOR_STR_(x)
+
 /// The filename of the core Android Runtime (ART) library.
 inline constexpr auto kArtLibraryName = "libart.so";
 
@@ -46,6 +52,6 @@ inline constexpr auto kLinkerPath = "/linker";
 const int kVersionCode = VERSION_CODE;
 
 /// The version name of the library, populated by the build system.
-const char *const kVersionName = VERSION_NAME;
+const char *const kVersionName = VECTOR_STR(VERSION_NAME);
 
 }  // namespace vector::native

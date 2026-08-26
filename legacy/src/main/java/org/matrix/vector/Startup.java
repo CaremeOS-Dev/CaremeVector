@@ -11,12 +11,27 @@ import de.robv.android.xposed.XposedInit;
 
 public class Startup {
 
+    // CAREME-DBG: temporary instrumentation
+    public static void vdbg(String msg) {
+        try {
+            java.io.FileWriter w = new java.io.FileWriter("/data/local/tmp/vdbg.txt", true);
+            w.write("[startup " + android.os.Process.myPid() + "] " + msg + "\n");
+            w.close();
+        } catch (Throwable t) {
+            // never let logging break injection
+        }
+    }
+
     public static void bootstrapXposed(boolean systemServerStarted) {
         try {
+            vdbg("bootstrapXposed: VectorStartup.bootstrap");
             VectorStartup.bootstrap(XposedInit.startsSystemServer, systemServerStarted);
+            vdbg("bootstrapXposed: XposedInit.loadLegacyModules");
             XposedInit.loadLegacyModules();
+            vdbg("bootstrapXposed: done");
         } catch (Throwable t) {
             Utils.logE("Error during framework initialization", t);
+            vdbg("bootstrapXposed threw: " + t);
         }
     }
 
@@ -31,13 +46,20 @@ public class Startup {
 
     public static void initXposed(boolean isSystem, String processName, String appDir, IFrameworkService service) {
         // Establish the Dependency Injection contract
+        vdbg("initXposed: VectorBootstrap.init");
         VectorBootstrap.INSTANCE.init(new LegacyDelegateImpl());
 
         // Initialize legacy resources and state
-        XposedBridge.initXResources();
+        // CAREME: initXResources is deferred to XposedInit.hookResources() first use.
+        // Calling Resources.getSystem() this early (inside the forked system_server, before
+        // overlay idmaps exist) makes CaremeOS's libandroid_runtime exec /system/bin/idmap
+        // IN PLACE, wiping the system_server image; the zygote then suicides and loops.
+        vdbg("initXposed: XposedBridge.initXResources DEFERRED");
         XposedInit.startsSystemServer = isSystem;
 
         // Hand off execution to the modern framework initialization
+        vdbg("initXposed: VectorStartup.init");
         VectorStartup.init(isSystem, processName, appDir, service);
+        vdbg("initXposed: done");
     }
 }

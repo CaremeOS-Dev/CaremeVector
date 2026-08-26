@@ -14,6 +14,15 @@ object ResourcesHook {
         typedArraySuperClass: String,
     ): ClassLoader
 
+    // CAREME: writes the dummy-superclass dex to a real file (in-memory dex can't define a class
+    // that extends a concrete framework class on this ART 8.1). Returns true on success.
+    @JvmStatic
+    external fun writeDummyDex(
+        path: String,
+        resourceSuperClass: String,
+        typedArraySuperClass: String,
+    ): Boolean
+
     // Not @FastNative: the implementation walks a whole binary XML document and calls back into
     // Java once per attribute, and a fast transition leaves the thread runnable for all of it, so
     // anything waiting to suspend threads waits for the document.

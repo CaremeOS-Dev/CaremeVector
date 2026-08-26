@@ -12,6 +12,160 @@
 
 #include "ipc_bridge.h"
 
+// CAREME-DBG: temporary instrumentation to catch whoever terminates system_server.
+#include <dlfcn.h>
+#include <dobby.h>
+#include <fcntl.h>
+#include <link.h>
+#include <unwind.h>
+
+namespace caremedbg {
+
+static void vlog(const char *msg) {
+    int fd = open("/data/local/tmp/vdbg.txt", O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd >= 0) {
+        // Tag every line with the pid so parent (system_server) vs. a fork() child
+        // (e.g. verifySystemIdmaps' idmap child) is unambiguous in the log.
+        char pfx[24];
+        int n = snprintf(pfx, sizeof pfx, "[pid %d] ", getpid());
+        if (n > 0) write(fd, pfx, n);
+        write(fd, msg, strlen(msg));
+        write(fd, "\n", 1);
+        close(fd);
+    }
+}
+
+static _Unwind_Reason_Code bt_cb(struct _Unwind_Context *ctx, void *) {
+    void *ip = reinterpret_cast<void *>(_Unwind_GetIP(ctx));
+    if (ip) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "[vdbg-native]   pc %p", ip);
+        vlog(buf);
+    }
+    return _URC_NO_REASON;
+}
+
+static void (*orig_exit)(int) = nullptr;
+static void (*orig__exit)(int) = nullptr;
+static void (*orig_abort)(void) = nullptr;
+
+static void my_exit(int status) {
+    char buf[96];
+    snprintf(buf, sizeof buf, "[vdbg-native] exit(%d) called! backtrace:", status);
+    vlog(buf);
+    _Unwind_Backtrace(bt_cb, nullptr);
+    orig_exit(status);
+}
+
+static void my__exit(int status) {
+    char buf[96];
+    snprintf(buf, sizeof buf, "[vdbg-native] _exit(%d) called! backtrace:", status);
+    vlog(buf);
+    _Unwind_Backtrace(bt_cb, nullptr);
+    orig__exit(status);
+}
+
+static void my_abort(void) {
+    vlog("[vdbg-native] abort() called! backtrace:");
+    _Unwind_Backtrace(bt_cb, nullptr);
+    orig_abort();
+}
+
+// CAREME idmap fix. android::verifySystemIdmaps(const char*) is CaremeOS's eager overlay-idmap
+// pre-scan, reached from android_content_AssetManager_init(isSystem=true) i.e. the first
+// Resources.getSystem() in a process. Confirmed via IDA + ftrace: in the ptrace-injected
+// system_server its fork() effectively returns 0 in the parent, so system_server's own main
+// thread runs the child branch and execv("/system/bin/idmap") IN-PLACE, replacing the whole
+// process (SIGCHLD to zygote -> zygote self-terminates -> restart loop). A resource-hooking
+// module in the `system` scope makes Vector call getSystem() during module load, which is what
+// trips it. Neutralising the pre-scan is a functional no-op on this device: nothing in
+// /vendor/overlay targets "android", and libandroidfw creates any overlay idmap it actually
+// needs lazily and in-process (AssetManager::createIdmap, no exec), so resource overlays and
+// full XResources hooking keep working.
+static void (*orig_verifySystemIdmaps)(const char *) = nullptr;
+static void my_verifySystemIdmaps(const char *) {
+    vlog("[vdbg-native] verifySystemIdmaps() neutralized (skipped in-place idmap exec)");
+}
+
+// libandroid_runtime.so is stripped to a .gnu_debugdata MiniDebugInfo whose in-process XZ decode
+// is unreliable here, so resolve the local symbol by its known ELF vaddr against the runtime load
+// bias from dl_iterate_phdr instead. verifySystemIdmaps is at vaddr 0xbb3b1 (Thumb bit set);
+// prologue `PUSH {R4-R6,LR}; SUB SP,SP,#0x120` == 70 b5 c8 b0 is checked before hooking so a
+// firmware whose layout differs is left untouched rather than mis-patched.
+static uintptr_t g_art_runtime_bias = 0;
+static int art_runtime_phdr_cb(struct dl_phdr_info *info, size_t, void *) {
+    if (info->dlpi_name && strstr(info->dlpi_name, "libandroid_runtime.so")) {
+        g_art_runtime_bias = static_cast<uintptr_t>(info->dlpi_addr);
+        return 1;  // found; stop iterating
+    }
+    return 0;
+}
+
+static void install_idmap_neutralizer() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    g_art_runtime_bias = 0;
+    dl_iterate_phdr(art_runtime_phdr_cb, nullptr);
+    if (!g_art_runtime_bias) {
+        vlog("[vdbg-native] idmap-neutralizer: libandroid_runtime.so not mapped");
+        return;
+    }
+    constexpr uintptr_t kVerifyVaddr = 0xbb3b1;  // Thumb bit set
+    uintptr_t thumb_addr = g_art_runtime_bias + kVerifyVaddr;
+    const auto *code = reinterpret_cast<const unsigned char *>(thumb_addr & ~static_cast<uintptr_t>(1));
+    static const unsigned char kSig[4] = {0x70, 0xb5, 0xc8, 0xb0};
+    if (memcmp(code, kSig, sizeof kSig) != 0) {
+        char buf[128];
+        snprintf(buf, sizeof buf,
+                 "[vdbg-native] idmap-neutralizer: sig mismatch @ %p (%02x %02x %02x %02x), skip",
+                 code, code[0], code[1], code[2], code[3]);
+        vlog(buf);
+        return;
+    }
+    int rc = DobbyHook(reinterpret_cast<void *>(thumb_addr),
+                       reinterpret_cast<void *>(&my_verifySystemIdmaps),
+                       reinterpret_cast<void **>(&orig_verifySystemIdmaps));
+    char buf[96];
+    snprintf(buf, sizeof buf, "[vdbg-native] verifySystemIdmaps hooked @ %p rc=%d", (void *)thumb_addr,
+             rc);
+    vlog(buf);
+}
+
+static void install_exit_hooks() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    void *libc = dlopen("libc.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!libc) {
+        vlog("[vdbg-native] install_exit_hooks: no libc handle");
+        return;
+    }
+    int ok = 0;
+    if (void *p = dlsym(libc, "exit"))
+        ok += DobbyHook(p, reinterpret_cast<void *>(&my_exit),
+                        reinterpret_cast<void **>(&orig_exit)) == 0;
+    if (void *p = dlsym(libc, "_exit"))
+        ok += DobbyHook(p, reinterpret_cast<void *>(&my__exit),
+                        reinterpret_cast<void **>(&orig__exit)) == 0;
+    if (void *p = dlsym(libc, "abort"))
+        ok += DobbyHook(p, reinterpret_cast<void *>(&my_abort),
+                        reinterpret_cast<void **>(&orig_abort)) == 0;
+    // NOTE: no execve hook. CaremeOS's verifySystemIdmaps() does a normal fork()+child execv()
+    // of /system/bin/idmap (confirmed via IDA: fork@LIBC, not an in-place exec). The idmap child
+    // is malloc-free before execv (ro.boot.vendor.overlay.theme is empty) and idmap finds no
+    // android-targeted static overlay, so it exits 0 and system_server survives — exactly as the
+    // uninjected boot does. The previous always-on execve blocker turned that clean child execv
+    // into exit(1) -> fork-unsafe static dtor -> bad free -> SIGABRT, which is what killed the
+    // framework. exit/_exit/abort stay hooked purely as (pid-tagged) diagnostics for this round.
+    char buf[64];
+    snprintf(buf, sizeof buf, "[vdbg-native] exit hooks installed: %d (no execve blocker)", ok);
+    vlog(buf);
+    install_idmap_neutralizer();
+}
+
+}  // namespace caremedbg
+
 namespace vector::native::module {
 
 // --- Process UID Constants ---
@@ -34,8 +188,8 @@ constexpr int PER_USER_RANGE = 100000;
 
 // Defined via CMake generated marcos
 constexpr uid_t kHostPackageUid = INJECTED_PACKAGE_UID;
-const char *const kHostPackageName = INJECTED_PACKAGE_NAME;
-const char *const kManagerPackageName = MANAGER_PACKAGE_NAME;
+const char *const kHostPackageName = VECTOR_STR(INJECTED_PACKAGE_NAME);
+const char *const kManagerPackageName = VECTOR_STR(MANAGER_PACKAGE_NAME);
 constexpr uid_t GID_INET = 3003;  // Android's Internet group ID.
 
 enum RuntimeFlags : uint32_t {
@@ -274,7 +428,7 @@ void VectorModule::preAppSpecialize(zygisk::AppSpecializeArgs *args) {
                 env_->SetIntArrayRegion(args->gids, 0, 1, &inet_gid);
             }
 
-            args->nice_name = env_->NewStringUTF(INJECTED_PACKAGE_NAME);
+            args->nice_name = env_->NewStringUTF(VECTOR_STR(INJECTED_PACKAGE_NAME));
             args->gids = new_gids;
         }
     }
@@ -360,6 +514,12 @@ void VectorModule::postAppSpecialize(const zygisk::AppSpecializeArgs *args) {
     // Find the Java entrypoint.
     this->SetupEntryClass(env_);
 
+    // CAREME: same in-place idmap exec that kills system_server also hits injected app processes
+    // (verifySystemIdmaps -> exit(1) -> __cxa_finalize runs our fork-unsafe static dtors ->
+    // je_free SIGSEGV) once a resource-hooking module in their scope makes forkCommon touch the
+    // system resources. Neutralise it here too, before modules load.
+    caremedbg::install_idmap_neutralizer();
+
     // Hand off control to the Java side of the framework.
     bool entered = this->FindAndCall(
         env_, "forkCommon", "(ZZLjava/lang/String;Ljava/lang/String;Landroid/os/IBinder;)V",
@@ -392,6 +552,8 @@ void VectorModule::postServerSpecialize(const zygisk::ServerSpecializeArgs *args
     }
 
     LOGD("Attempting injection into system_server.");
+    caremedbg::vlog("[vdbg-native] postServerSpecialize enter");
+    caremedbg::install_exit_hooks();
 
     // --- Device-Specific Workaround ---
     // Some ZTE devices require argv[0] to be explicitly set to "system_server"
@@ -455,10 +617,12 @@ void VectorModule::postServerSpecialize(const zygisk::ServerSpecializeArgs *args
     this->SetupEntryClass(env_);
 
     auto system_name = lsplant::ScopedLocalRef(env_, env_->NewStringUTF("system"));
+    caremedbg::vlog("[vdbg-native] before FindAndCall(forkCommon)");
     bool entered = this->FindAndCall(
         env_, "forkCommon", "(ZZLjava/lang/String;Ljava/lang/String;Landroid/os/IBinder;)V",
         JNI_TRUE, is_late_inject, system_name.get(), nullptr, manager_binder.get(),
         is_manager_app_);
+    caremedbg::vlog("[vdbg-native] after FindAndCall(forkCommon)");
 
     if (entered) {
         LOGI("Injected Vector framework into system_server.");
