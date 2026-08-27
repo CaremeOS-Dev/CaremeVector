@@ -36,6 +36,8 @@ val defaultManagerPackageName = rootProject.extra["defaultManagerPackageName"] a
 // Shared with checkXResourcesIsolation below because that check consumes R8's output and is only
 // meaningful when R8 runs.
 val minifyInjectedFramework = false
+val caremeNativeBisectTarget =
+    providers.gradleProperty("caremeNativeBisect").orElse("none")
 
 android {
     namespace = "org.matrix.vector"
@@ -72,7 +74,10 @@ android {
             isMinifyEnabled = minifyInjectedFramework
             proguardFiles("proguard-rules.pro")
             externalNativeBuild {
-                cmake { arguments.add("-DCAREMEOS_SAFE_NATIVE=ON") }
+                cmake {
+                    arguments.add("-DCAREMEOS_SAFE_NATIVE=ON")
+                    arguments.add("-DCAREMEOS_BISECT_TARGET=${caremeNativeBisectTarget.get()}")
+                }
             }
         }
     }

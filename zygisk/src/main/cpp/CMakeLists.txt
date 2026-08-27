@@ -11,6 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # variants and symbol stripping, but use conservative native codegen until the exact optimizer UB
 # (Dobby's release-only code path vs C/C++ -O2) is narrowed further.
 option(CAREMEOS_SAFE_NATIVE "Use conservative native codegen for CaremeOS ART 8.1" OFF)
+set(CAREMEOS_BISECT_TARGET "none" CACHE STRING "Temporarily optimize one target: lsplant, native, or zygisk")
 if (CAREMEOS_SAFE_NATIVE)
     set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O0 -g -DNDEBUG" CACHE STRING "" FORCE)
     set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O0 -g -DNDEBUG" CACHE STRING "" FORCE)
@@ -23,6 +24,21 @@ add_subdirectory(${VECTOR_ROOT}/native native)
 
 add_library(${PROJECT_NAME} SHARED module.cpp ipc_bridge.cpp)
 target_include_directories(${PROJECT_NAME} PUBLIC include)
+
+# Diagnostic-only optimizer bisection. Global -O0 stays the production default; a local build may
+# pass -PcaremeNativeBisect=<target> through Gradle to put only that target back at -O2. Target
+# options are appended after the global RelWithDebInfo flags, so -O2 wins for exactly one component.
+if (CAREMEOS_SAFE_NATIVE)
+    if (CAREMEOS_BISECT_TARGET STREQUAL "lsplant")
+        target_compile_options(lsplant_static PRIVATE -O2)
+    elseif (CAREMEOS_BISECT_TARGET STREQUAL "native")
+        target_compile_options(native PRIVATE -O2)
+    elseif (CAREMEOS_BISECT_TARGET STREQUAL "zygisk")
+        target_compile_options(${PROJECT_NAME} PRIVATE -O2)
+    elseif (NOT CAREMEOS_BISECT_TARGET STREQUAL "none")
+        message(FATAL_ERROR "Unknown CAREMEOS_BISECT_TARGET=${CAREMEOS_BISECT_TARGET}")
+    endif()
+endif()
 
 target_link_libraries(${PROJECT_NAME} native log)
 
