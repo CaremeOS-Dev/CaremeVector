@@ -27,6 +27,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import org.matrix.vector.manager.R
 import org.matrix.vector.manager.di.ServiceLocator
+import org.matrix.vector.manager.ui.theme.isWatch
 import kotlinx.coroutines.flow.first
 import org.matrix.vector.manager.logW
 
@@ -48,6 +49,18 @@ private const val DAEMON_TIMEOUT_MS = 2_500L
  */
 @Composable
 fun SplashGate(content: @Composable () -> Unit) {
+    // CAREME: on the watch the 800ms artwork + 320ms crossfade read as a stall on an already-slow
+    // first launch, and the daemon binder is what the gate actually waits on. Skip the artwork and
+    // the crossfade there; the daemon handshake below still gates the content.
+    if (isWatch()) {
+        val bound = remember { mutableStateOf<Boolean?>(null) }
+        LaunchedEffect(Unit) {
+            bound.value =
+                withTimeoutOrNull(DAEMON_TIMEOUT_MS) { ServiceLocator.service.first { it != null } } != null
+        }
+        if (bound.value != null) content() else Box(Modifier.fillMaxSize())
+        return
+    }
     var ready by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {

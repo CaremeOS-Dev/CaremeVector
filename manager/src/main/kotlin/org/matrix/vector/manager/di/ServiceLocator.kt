@@ -289,12 +289,23 @@ object ServiceLocator {
      * prefetch failed would be worse than one that is merely slow.
      */
     fun prefetch() {
+        // CAREME: on the watch the startup prefetch burst (installed-apps scan + store refresh +
+        // GitHub cache read) competes with first composition on a weak CPU and is the main source of
+        // the launch stall. It only warms caches — nothing needs it — so skip it on small screens.
+        if (isWatchDevice()) return
         appScope.launch { runCatching { apps.getInstalledApps() } }
         appScope.launch { runCatching { store.refresh(false) } }
         // From disk only. Opening the manager is not by itself a reason to talk to GitHub, and
         // asking for a revalidation here would override Home's own gate — the one that decides how
         // rarely a launch is allowed to go and check.
         appScope.launch { runCatching { github.load(GitHubRepository.Freshness.Cached) } }
+    }
+
+    // CAREME: true on a small screen (smartwatch). Read from the resources configuration, which is
+    // available before any composition. 320dp covers the XTC watch (320x360 @ 320dpi).
+    private fun isWatchDevice(): Boolean {
+        val ctx = appContext ?: return false
+        return ctx.resources.configuration.smallestScreenWidthDp <= 340
     }
 
     /** Called from `Constants.setBinder`, possibly before [attach]. */

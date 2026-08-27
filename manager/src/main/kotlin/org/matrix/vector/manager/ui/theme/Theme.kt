@@ -15,6 +15,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import org.matrix.vector.manager.di.ServiceLocator
+import org.matrix.vector.manager.ui.theme.isWatch
 
 @Composable
 fun VectorTheme(content: @Composable () -> Unit) {
@@ -46,9 +47,9 @@ fun VectorTheme(content: @Composable () -> Unit) {
 
     MaterialExpressiveTheme(
         colorScheme = scheme,
-        // The expressive motion scheme is what makes a state change feel caused rather than
-        // scheduled. It drives the status indicator's shape morph and the nav transitions.
-        motionScheme = MotionScheme.expressive(),
+        // CAREME: the expressive motion scheme is spring-driven and expensive on the watch's weak
+        // CPU; the standard scheme uses cheap fixed-duration tweens instead. Layout is unchanged.
+        motionScheme = if (isWatch()) MotionScheme.standard() else MotionScheme.expressive(),
         content = content,
     )
 }
