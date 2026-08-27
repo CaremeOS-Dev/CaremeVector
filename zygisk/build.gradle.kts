@@ -58,7 +58,13 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = true
+            // CaremeOS 8.1: R8 shrinking this injected framework DEX corrupts ART native-method
+            // state during startup. The failure is deterministic: system_server reaches
+            // WifiNative.registerNatives, its ArtMethod data_/JNI entry at offset 0x18 contains a
+            // wild pointer, and the compiled native stub BLX-es into it. The same sources with an
+            // unshrunk DEX boot cleanly. Keep Release native optimization/stripping and the
+            // manager/daemon minifiers, but do not run R8 over the framework DEX loaded into ART.
+            isMinifyEnabled = false
             proguardFiles("proguard-rules.pro")
         }
     }
