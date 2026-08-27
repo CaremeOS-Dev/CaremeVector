@@ -12,7 +12,17 @@ data class ProcessScope(val processName: String, val uid: Int)
  */
 data class DaemonState(
     // State non configurable for users
-    val isDexObfuscateEnabled: Boolean = !BuildConfig.DEBUG,
+    //
+    // CAREME: dex obfuscation stays off in every build, not only debug (upstream: !BuildConfig.DEBUG).
+    // It rewrites the `Landroid/content/res/XRes` and `Lde/robv/android/xposed/` prefixes to random
+    // names as each dex is loaded (daemon/src/main/jni/obfuscation.cpp). That is self-consistent
+    // upstream, where XResources' super class is generated on the device and is renamed along with
+    // it. On CaremeOS XResources extends android.content.res.Resources directly — ART 8.1 cannot
+    // resolve a cross-dex super class at define-time, see XResources.java — so the renamed class and
+    // the native-side name lookups no longer agree, and a release build died with SIGSEGV/SIGBUS in
+    // system_server while loading modules. Obfuscation only frustrates module-side detection; a
+    // booting framework is worth more here.
+    val isDexObfuscateEnabled: Boolean = false,
     // States initialized after system services are ready
     val isCacheReady: Boolean = false,
     val managerUid: Int = -1,
