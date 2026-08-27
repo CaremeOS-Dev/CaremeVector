@@ -14,6 +14,9 @@ option(CAREMEOS_SAFE_NATIVE "Use conservative native codegen for CaremeOS ART 8.
 if (CAREMEOS_SAFE_NATIVE)
     set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O0 -g -DNDEBUG" CACHE STRING "" FORCE)
     set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O0 -g -DNDEBUG" CACHE STRING "" FORCE)
+    # Explicit rather than relying on the option's default: CMake preserves an earlier ON value in
+    # the variant cache, which would make an incremental build differ from a clean checkout.
+    set(DOBBY_DEBUG OFF CACHE BOOL "" FORCE)
 endif()
 
 add_subdirectory(${VECTOR_ROOT}/native native)
