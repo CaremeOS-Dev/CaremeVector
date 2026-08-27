@@ -186,8 +186,11 @@ jobs:
       # the manager's update check, resolves to. The body is the module's own zygisk/changelog.md
       # under a GitHub H1 the release page shows. The changelog itself carries no title line — the
       # manager renders it beneath its own heading, so a banner there would only read twice.
+      # Upstream only. A fork (CaremeVector) builds unsigned and versions from its own history, so
+      # a fork tag build validates compilation but must not publish — otherwise it overwrites a
+      # release cut by hand from a correctly-versioned, signed local build with an unsigned one.
       - name: Publish release
-        if: ${{ success() && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+        if: ${{ success() && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && github.repository_owner == 'JingMatrix' }}
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
