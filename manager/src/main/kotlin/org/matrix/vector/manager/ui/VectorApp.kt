@@ -14,10 +14,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
 import androidx.navigation3.runtime.EntryProviderScope
 import androidx.navigation3.runtime.NavKey
+import org.matrix.vector.manager.ui.theme.isSquareWatch
+import org.matrix.vector.manager.ui.theme.watchDensityScale
 import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
@@ -76,6 +80,20 @@ import org.matrix.vector.ui.store.RepoScreen
  */
 @Composable
 fun VectorApp() {
+    // CAREME: on a square watch the stock 320dpi renders the UI cramped. Lower the density (~134dpi)
+    // so dp sizes resolve to more pixels and content is larger and less crowded. Applied at the shell
+    // so every destination inherits it. Only the square face — a round bezel already crops corners.
+    if (isSquareWatch()) {
+        val base = LocalDensity.current
+        val scaled = remember(base) { Density(base.density * watchDensityScale, base.fontScale) }
+        CompositionLocalProvider(LocalDensity provides scaled) { VectorAppShell() }
+        return
+    }
+    VectorAppShell()
+}
+
+@Composable
+private fun VectorAppShell() {
     val navigator = rememberNavigator(VectorNavPanelStore, TOP_LEVEL_DESTINATIONS)
 
     // Where the launch intent asked to open. The activity has no back stack to act on, so it leaves
