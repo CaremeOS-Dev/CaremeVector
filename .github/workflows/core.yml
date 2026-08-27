@@ -2,8 +2,12 @@ name: Core
 
 on:
   workflow_dispatch:
+    # `main` is here for the CaremeVector fork, whose default branch is main rather than upstream's
+    # master; without it a push to the fork's mainline ran no CI at all. The canary-publish step
+    # below still gates on refs/heads/master, so a fork push builds and validates but publishes
+    # nothing — which is what an unsigned fork should do.
   push:
-    branches: [ master ]
+    branches: [ master, main ]
     tags: [ v* ]
   pull_request:
   merge_group:

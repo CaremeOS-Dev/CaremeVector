@@ -25,18 +25,23 @@ abstract class GitCommitCountValueSource : ValueSource<String, ValueSourceParame
     @get:Inject abstract val execOperations: ExecOperations
 
     override fun obtain(): String {
-        val output = ByteArrayOutputStream()
-        val result = execOperations.exec {
-            commandLine("git", "rev-list", "--count", "refs/remotes/origin/master")
-            standardOutput = output
-            isIgnoreExitValue = true
+        fun countOf(ref: String): String? {
+            val output = ByteArrayOutputStream()
+            val result = execOperations.exec {
+                commandLine("git", "rev-list", "--count", ref)
+                standardOutput = output
+                isIgnoreExitValue = true
+            }
+            return output.toString().trim().takeIf { result.exitValue == 0 && it.isNotBlank() }
         }
-        // Return the count if successful, otherwise a default of "1".
-        return if (result.exitValue == 0 && output.toString().isNotBlank()) {
-            output.toString().trim()
-        } else {
-            "1"
-        }
+        // Mainline commit count. Upstream's mainline is `master`; a fork's is `main`, and a fork
+        // checked out by CI has no refs/remotes/origin/master — which used to fall straight through
+        // to "1", so every fork CI build shipped as version 1. Try the fork's mainline, then HEAD,
+        // before giving up, so a fork versions from its own history instead of misreporting as 1.
+        return countOf("refs/remotes/origin/master")
+            ?: countOf("refs/remotes/origin/main")
+            ?: countOf("HEAD")
+            ?: "1"
     }
 }
 
