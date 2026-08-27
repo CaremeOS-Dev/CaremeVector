@@ -169,7 +169,7 @@ androidComponents {
                     }
                 }
                 val dexOutPath =
-                    if (variantLowered == "release")
+                    if (variantLowered == "release" && minifyInjectedFramework)
                         layout.buildDirectory.dir(
                             "intermediates/dex/$variantLowered/minify${variantCapped}WithR8"
                         )
