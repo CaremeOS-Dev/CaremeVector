@@ -5,6 +5,18 @@ project(zygisk)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# CaremeOS ART 8.1: the optimized native build corrupts the native entry stored in an unrelated
+# ArtMethod (WifiNative.registerNatives) before Wi-Fi starts. A Debug-native/Release-Java hybrid is
+# stable on-device, which isolates the fault to this native tree. Keep the production Java/APK
+# variants and symbol stripping, but use conservative native codegen until the exact optimizer UB
+# (Dobby -O3 vs C++ RelWithDebInfo -O2) is narrowed further.
+option(CAREMEOS_SAFE_NATIVE "Use conservative native codegen for CaremeOS ART 8.1" OFF)
+if (CAREMEOS_SAFE_NATIVE)
+    set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O0 -g -DNDEBUG" CACHE STRING "" FORCE)
+    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O0 -g -DNDEBUG" CACHE STRING "" FORCE)
+    set(DOBBY_DEBUG ON CACHE BOOL "" FORCE)
+endif()
+
 add_subdirectory(${VECTOR_ROOT}/native native)
 
 add_library(${PROJECT_NAME} SHARED module.cpp ipc_bridge.cpp)

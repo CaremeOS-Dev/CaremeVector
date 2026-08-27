@@ -71,6 +71,9 @@ android {
             // manager/daemon minifiers, but do not run R8 over the framework DEX loaded into ART.
             isMinifyEnabled = minifyInjectedFramework
             proguardFiles("proguard-rules.pro")
+            externalNativeBuild {
+                cmake { arguments.add("-DCAREMEOS_SAFE_NATIVE=ON") }
+            }
         }
     }
 
