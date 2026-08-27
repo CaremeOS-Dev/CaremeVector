@@ -5,39 +5,21 @@ project(zygisk)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# CaremeOS ART 8.1: the optimized native build corrupts the native entry stored in an unrelated
-# ArtMethod (WifiNative.registerNatives) before Wi-Fi starts. A Debug-native/Release-Java hybrid is
-# stable on-device, which isolates the fault to this native tree. Keep the production Java/APK
-# variants and symbol stripping, but use conservative native codegen until the exact optimizer UB
-# (Dobby's release-only code path vs C/C++ -O2) is narrowed further.
-option(CAREMEOS_SAFE_NATIVE "Use conservative native codegen for CaremeOS ART 8.1" OFF)
-set(CAREMEOS_BISECT_TARGET "none" CACHE STRING "Temporarily optimize one target: lsplant, native, or zygisk")
-if (CAREMEOS_SAFE_NATIVE)
-    set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O0 -g -DNDEBUG" CACHE STRING "" FORCE)
-    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O0 -g -DNDEBUG" CACHE STRING "" FORCE)
-    # Explicit rather than relying on the option's default: CMake preserves an earlier ON value in
-    # the variant cache, which would make an incremental build differ from a clean checkout.
-    set(DOBBY_DEBUG OFF CACHE BOOL "" FORCE)
-endif()
+# CaremeOS ART 8.1: on-device one-target bisection showed that optimizing only lsplant_static at
+# -O2 is sufficient to corrupt the native entry of the unrelated WifiNative.registerNatives
+# ArtMethod before Wi-Fi starts; keeping LSPlant at -O0 while every other native target remains on
+# normal RelWithDebInfo codegen boots cleanly. Restrict the workaround to that one target.
+option(CAREMEOS_SAFE_LSPLANT "Compile LSPlant without optimization on CaremeOS ART 8.1" OFF)
 
 add_subdirectory(${VECTOR_ROOT}/native native)
 
 add_library(${PROJECT_NAME} SHARED module.cpp ipc_bridge.cpp)
 target_include_directories(${PROJECT_NAME} PUBLIC include)
 
-# Diagnostic-only optimizer bisection. Global -O0 stays the production default; a local build may
-# pass -PcaremeNativeBisect=<target> through Gradle to put only that target back at -O2. Target
-# options are appended after the global RelWithDebInfo flags, so -O2 wins for exactly one component.
-if (CAREMEOS_SAFE_NATIVE)
-    if (CAREMEOS_BISECT_TARGET STREQUAL "lsplant")
-        target_compile_options(lsplant_static PRIVATE -O2)
-    elseif (CAREMEOS_BISECT_TARGET STREQUAL "native")
-        target_compile_options(native PRIVATE -O2)
-    elseif (CAREMEOS_BISECT_TARGET STREQUAL "zygisk")
-        target_compile_options(${PROJECT_NAME} PRIVATE -O2)
-    elseif (NOT CAREMEOS_BISECT_TARGET STREQUAL "none")
-        message(FATAL_ERROR "Unknown CAREMEOS_BISECT_TARGET=${CAREMEOS_BISECT_TARGET}")
-    endif()
+if (CAREMEOS_SAFE_LSPLANT)
+    # A target option is emitted after CMake's global RelWithDebInfo -O2, so this final -O0 wins for
+    # LSPlant alone. Vector native, IPCBridge, Dobby, dex_builder and other dependencies stay O2.
+    target_compile_options(lsplant_static PRIVATE -O0)
 endif()
 
 target_link_libraries(${PROJECT_NAME} native log)
