@@ -12,66 +12,7 @@
 
 #include "ipc_bridge.h"
 
-// CAREME-DBG: temporary instrumentation to catch whoever terminates system_server.
-#include <dlfcn.h>
-#include <dobby.h>
-#include <fcntl.h>
-#include <link.h>
-#include <unwind.h>
-
-namespace caremedbg {
-
-static void vlog(const char *msg) {
-    int fd = open("/data/local/tmp/vdbg.txt", O_WRONLY | O_CREAT | O_APPEND, 0666);
-    if (fd >= 0) {
-        // Tag every line with the pid so parent (system_server) vs. a fork() child
-        // (e.g. verifySystemIdmaps' idmap child) is unambiguous in the log.
-        char pfx[24];
-        int n = snprintf(pfx, sizeof pfx, "[pid %d] ", getpid());
-        if (n > 0) write(fd, pfx, n);
-        write(fd, msg, strlen(msg));
-        write(fd, "\n", 1);
-        close(fd);
-    }
-}
-
-static _Unwind_Reason_Code bt_cb(struct _Unwind_Context *ctx, void *) {
-    void *ip = reinterpret_cast<void *>(_Unwind_GetIP(ctx));
-    if (ip) {
-        char buf[96];
-        snprintf(buf, sizeof buf, "[vdbg-native]   pc %p", ip);
-        vlog(buf);
-    }
-    return _URC_NO_REASON;
-}
-
-static void (*orig_exit)(int) = nullptr;
-static void (*orig__exit)(int) = nullptr;
-static void (*orig_abort)(void) = nullptr;
-
-static void my_exit(int status) {
-    char buf[96];
-    snprintf(buf, sizeof buf, "[vdbg-native] exit(%d) called! backtrace:", status);
-    vlog(buf);
-    _Unwind_Backtrace(bt_cb, nullptr);
-    orig_exit(status);
-}
-
-static void my__exit(int status) {
-    char buf[96];
-    snprintf(buf, sizeof buf, "[vdbg-native] _exit(%d) called! backtrace:", status);
-    vlog(buf);
-    _Unwind_Backtrace(bt_cb, nullptr);
-    orig__exit(status);
-}
-
-static void my_abort(void) {
-    vlog("[vdbg-native] abort() called! backtrace:");
-    _Unwind_Backtrace(bt_cb, nullptr);
-    orig_abort();
-}
-
-// CAREME idmap fix. android::verifySystemIdmaps(const char*) is CaremeOS's eager overlay-idmap
+// CaremeOS idmap fix. android::verifySystemIdmaps(const char*) is CaremeOS's eager overlay-idmap
 // pre-scan, reached from android_content_AssetManager_init(isSystem=true) i.e. the first
 // Resources.getSystem() in a process. Confirmed via IDA + ftrace: in the ptrace-injected
 // system_server its fork() effectively returns 0 in the parent, so system_server's own main
@@ -82,89 +23,120 @@ static void my_abort(void) {
 // /vendor/overlay targets "android", and libandroidfw creates any overlay idmap it actually
 // needs lazily and in-process (AssetManager::createIdmap, no exec), so resource overlays and
 // full XResources hooking keep working.
+#include <dobby.h>
+#include <link.h>
+
+namespace caremeos_idmap {
+
 static void (*orig_verifySystemIdmaps)(const char *) = nullptr;
 static void my_verifySystemIdmaps(const char *) {
-    vlog("[vdbg-native] verifySystemIdmaps() neutralized (skipped in-place idmap exec)");
+    // Deliberately empty: skip CaremeOS's in-place idmap exec (see comment above).
 }
 
-// libandroid_runtime.so is stripped to a .gnu_debugdata MiniDebugInfo whose in-process XZ decode
-// is unreliable here, so resolve the local symbol by its known ELF vaddr against the runtime load
-// bias from dl_iterate_phdr instead. verifySystemIdmaps is at vaddr 0xbb3b1 (Thumb bit set);
-// prologue `PUSH {R4-R6,LR}; SUB SP,SP,#0x120` == 70 b5 c8 b0 is checked before hooking so a
-// firmware whose layout differs is left untouched rather than mis-patched.
-static uintptr_t g_art_runtime_bias = 0;
-static int art_runtime_phdr_cb(struct dl_phdr_info *info, size_t, void *) {
+// verifySystemIdmaps is a local symbol; libandroid_runtime.so keeps its name only in a
+// .gnu_debugdata MiniDebugInfo whose in-process XZ decode is unreliable here, so it cannot be
+// resolved by dlsym. It is located by a byte signature over its prologue plus a few following
+// instructions, verified unique in the CaremeOS 8.1 image (tested on CaremeOS 1.0 & 2.0). Byte 6
+// is a literal-pool PC-relative imm8 that moves with layout, so it is wildcarded; every other byte
+// is a fixed opcode:
+//   70 b5              PUSH  {R4-R6,LR}
+//   c8 b0              SUB   SP, SP, #0x120
+//   04 46              MOV   R4, R0
+//   ?? 48              LDR   R0, =__stack_chk_guard_ptr   (imm8 wildcarded)
+//   78 44 00 68 00 68 47 90   ADD R0,PC ; LDR ; LDR ; STR R0,[SP,#0x11c]
+//   4f f4 7a 70        MOV.W R0, #0x3E8
+//   00 90              STR   R0, [SP]
+static const unsigned char kSig[] = {0x70, 0xb5, 0xc8, 0xb0, 0x04, 0x46, 0x00, 0x48,
+                                      0x78, 0x44, 0x00, 0x68, 0x00, 0x68, 0x47, 0x90,
+                                      0x4f, 0xf4, 0x7a, 0x70, 0x00, 0x90};
+static const unsigned char kMask[] = {1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+static constexpr size_t kSigLen = sizeof kSig;
+// Vaddr of the function in the reference image; a fast-path hint checked before scanning.
+static constexpr uintptr_t kVerifyVaddrHint = 0xbb3b0;
+
+static bool sig_match(const unsigned char *p) {
+    for (size_t i = 0; i < kSigLen; i++)
+        if (kMask[i] && p[i] != kSig[i]) return false;
+    return true;
+}
+
+struct ScanState {
+    uintptr_t base = 0;
+    const ElfW(Phdr) * phdr = nullptr;
+    ElfW(Half) phnum = 0;
+};
+
+static int phdr_cb(struct dl_phdr_info *info, size_t, void *data) {
     if (info->dlpi_name && strstr(info->dlpi_name, "libandroid_runtime.so")) {
-        g_art_runtime_bias = static_cast<uintptr_t>(info->dlpi_addr);
+        auto *st = static_cast<ScanState *>(data);
+        st->base = static_cast<uintptr_t>(info->dlpi_addr);
+        st->phdr = info->dlpi_phdr;
+        st->phnum = info->dlpi_phnum;
         return 1;  // found; stop iterating
     }
     return 0;
+}
+
+// True if [vaddr, vaddr+kSigLen) lies inside an executable PT_LOAD segment, so the hint read below
+// can never fault on a firmware whose library is smaller or laid out differently.
+static bool in_exec_seg(const ScanState &st, uintptr_t vaddr) {
+    for (ElfW(Half) i = 0; i < st.phnum; i++) {
+        const ElfW(Phdr) &ph = st.phdr[i];
+        if (ph.p_type == PT_LOAD && (ph.p_flags & PF_X) && vaddr >= ph.p_vaddr &&
+            vaddr + kSigLen <= ph.p_vaddr + ph.p_memsz)
+            return true;
+    }
+    return false;
+}
+
+// Returns the (even) function start address, or 0 if not found / ambiguous.
+static uintptr_t locate(const ScanState &st) {
+    // Fast path: the reference vaddr, bounds-checked before the read.
+    if (in_exec_seg(st, kVerifyVaddrHint) &&
+        sig_match(reinterpret_cast<const unsigned char *>(st.base + kVerifyVaddrHint)))
+        return st.base + kVerifyVaddrHint;
+
+    // Fallback: scan executable PT_LOAD segments for the unique signature. Accept only a single
+    // match; zero or several means the layout is not understood and the process is left untouched.
+    uintptr_t found = 0;
+    int count = 0;
+    for (ElfW(Half) i = 0; i < st.phnum; i++) {
+        const ElfW(Phdr) &ph = st.phdr[i];
+        if (ph.p_type != PT_LOAD || !(ph.p_flags & PF_X) || ph.p_memsz < kSigLen) continue;
+        const auto *seg = reinterpret_cast<const unsigned char *>(st.base + ph.p_vaddr);
+        for (size_t off = 0; off + kSigLen <= ph.p_memsz; off += 2) {  // Thumb: 2-byte aligned
+            if (sig_match(seg + off)) {
+                found = reinterpret_cast<uintptr_t>(seg + off);
+                if (++count > 1) return 0;  // ambiguous -> bail
+            }
+        }
+    }
+    return count == 1 ? found : 0;
 }
 
 static void install_idmap_neutralizer() {
     static bool done = false;
     if (done) return;
     done = true;
-    g_art_runtime_bias = 0;
-    dl_iterate_phdr(art_runtime_phdr_cb, nullptr);
-    if (!g_art_runtime_bias) {
-        vlog("[vdbg-native] idmap-neutralizer: libandroid_runtime.so not mapped");
+
+    ScanState st;
+    dl_iterate_phdr(phdr_cb, &st);
+    if (!st.base) {
+        LOGW("idmap-neutralizer: libandroid_runtime.so not mapped");
         return;
     }
-    constexpr uintptr_t kVerifyVaddr = 0xbb3b1;  // Thumb bit set
-    uintptr_t thumb_addr = g_art_runtime_bias + kVerifyVaddr;
-    const auto *code = reinterpret_cast<const unsigned char *>(thumb_addr & ~static_cast<uintptr_t>(1));
-    static const unsigned char kSig[4] = {0x70, 0xb5, 0xc8, 0xb0};
-    if (memcmp(code, kSig, sizeof kSig) != 0) {
-        char buf[128];
-        snprintf(buf, sizeof buf,
-                 "[vdbg-native] idmap-neutralizer: sig mismatch @ %p (%02x %02x %02x %02x), skip",
-                 code, code[0], code[1], code[2], code[3]);
-        vlog(buf);
+    uintptr_t fn = locate(st);
+    if (!fn) {
+        LOGW("idmap-neutralizer: verifySystemIdmaps signature not found; left untouched");
         return;
     }
-    int rc = DobbyHook(reinterpret_cast<void *>(thumb_addr),
+    int rc = DobbyHook(reinterpret_cast<void *>(fn | 1),  // Thumb bit set
                        reinterpret_cast<void *>(&my_verifySystemIdmaps),
                        reinterpret_cast<void **>(&orig_verifySystemIdmaps));
-    char buf[96];
-    snprintf(buf, sizeof buf, "[vdbg-native] verifySystemIdmaps hooked @ %p rc=%d", (void *)thumb_addr,
-             rc);
-    vlog(buf);
+    LOGD("idmap-neutralizer: verifySystemIdmaps hooked @ {:#x} rc={}", fn, rc);
 }
 
-static void install_exit_hooks() {
-    static bool done = false;
-    if (done) return;
-    done = true;
-    void *libc = dlopen("libc.so", RTLD_NOW | RTLD_NOLOAD);
-    if (!libc) {
-        vlog("[vdbg-native] install_exit_hooks: no libc handle");
-        return;
-    }
-    int ok = 0;
-    if (void *p = dlsym(libc, "exit"))
-        ok += DobbyHook(p, reinterpret_cast<void *>(&my_exit),
-                        reinterpret_cast<void **>(&orig_exit)) == 0;
-    if (void *p = dlsym(libc, "_exit"))
-        ok += DobbyHook(p, reinterpret_cast<void *>(&my__exit),
-                        reinterpret_cast<void **>(&orig__exit)) == 0;
-    if (void *p = dlsym(libc, "abort"))
-        ok += DobbyHook(p, reinterpret_cast<void *>(&my_abort),
-                        reinterpret_cast<void **>(&orig_abort)) == 0;
-    // NOTE: no execve hook. CaremeOS's verifySystemIdmaps() does a normal fork()+child execv()
-    // of /system/bin/idmap (confirmed via IDA: fork@LIBC, not an in-place exec). The idmap child
-    // is malloc-free before execv (ro.boot.vendor.overlay.theme is empty) and idmap finds no
-    // android-targeted static overlay, so it exits 0 and system_server survives — exactly as the
-    // uninjected boot does. The previous always-on execve blocker turned that clean child execv
-    // into exit(1) -> fork-unsafe static dtor -> bad free -> SIGABRT, which is what killed the
-    // framework. exit/_exit/abort stay hooked purely as (pid-tagged) diagnostics for this round.
-    char buf[64];
-    snprintf(buf, sizeof buf, "[vdbg-native] exit hooks installed: %d (no execve blocker)", ok);
-    vlog(buf);
-    install_idmap_neutralizer();
-}
-
-}  // namespace caremedbg
+}  // namespace caremeos_idmap
 
 namespace vector::native::module {
 
@@ -518,7 +490,7 @@ void VectorModule::postAppSpecialize(const zygisk::AppSpecializeArgs *args) {
     // (verifySystemIdmaps -> exit(1) -> __cxa_finalize runs our fork-unsafe static dtors ->
     // je_free SIGSEGV) once a resource-hooking module in their scope makes forkCommon touch the
     // system resources. Neutralise it here too, before modules load.
-    caremedbg::install_idmap_neutralizer();
+    caremeos_idmap::install_idmap_neutralizer();
 
     // Hand off control to the Java side of the framework.
     bool entered = this->FindAndCall(
@@ -552,8 +524,7 @@ void VectorModule::postServerSpecialize(const zygisk::ServerSpecializeArgs *args
     }
 
     LOGD("Attempting injection into system_server.");
-    caremedbg::vlog("[vdbg-native] postServerSpecialize enter");
-    caremedbg::install_exit_hooks();
+    caremeos_idmap::install_idmap_neutralizer();
 
     // --- Device-Specific Workaround ---
     // Some ZTE devices require argv[0] to be explicitly set to "system_server"
@@ -577,6 +548,9 @@ void VectorModule::postServerSpecialize(const zygisk::ServerSpecializeArgs *args
 
     // --- Framework Injection for System Server ---
     auto &ipc_bridge = IPCBridge::GetInstance();
+    // Rendezvous ServiceManager name the daemon squats on and proxies; must match
+    // VectorDaemon.proxyServiceName. Verified working on CaremeOS — if it ever collides with real
+    // serial hardware, change it here AND in VectorDaemon.kt together.
     std::string bridgeServiceName = "serial";
     bool is_late_inject = (args->runtime_flags & RuntimeFlags::LATE_INJECT) != 0;
     if (is_late_inject) bridgeServiceName = "serial_vector";
@@ -617,12 +591,10 @@ void VectorModule::postServerSpecialize(const zygisk::ServerSpecializeArgs *args
     this->SetupEntryClass(env_);
 
     auto system_name = lsplant::ScopedLocalRef(env_, env_->NewStringUTF("system"));
-    caremedbg::vlog("[vdbg-native] before FindAndCall(forkCommon)");
     bool entered = this->FindAndCall(
         env_, "forkCommon", "(ZZLjava/lang/String;Ljava/lang/String;Landroid/os/IBinder;)V",
         JNI_TRUE, is_late_inject, system_name.get(), nullptr, manager_binder.get(),
         is_manager_app_);
-    caremedbg::vlog("[vdbg-native] after FindAndCall(forkCommon)");
 
     if (entered) {
         LOGI("Injected Vector framework into system_server.");

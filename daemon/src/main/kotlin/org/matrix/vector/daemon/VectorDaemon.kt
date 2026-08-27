@@ -45,6 +45,9 @@ object VectorDaemon {
   val bridgeServiceName = "activity"
 
   var isLateInject = false
+  // Rendezvous ServiceManager name; must match `bridgeServiceName` in the native module.cpp so the
+  // Zygisk module in system_server finds this daemon. The daemon proxies the real service of the
+  // same name, so hijacking it is transparent (verified on CaremeOS).
   var proxyServiceName = "serial"
 
   @JvmStatic
