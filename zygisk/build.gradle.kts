@@ -32,6 +32,11 @@ val injectedPackageName = rootProject.extra["injectedPackageName"] as String
 val injectedPackageUid = rootProject.extra["injectedPackageUid"] as Int
 val defaultManagerPackageName = rootProject.extra["defaultManagerPackageName"] as String
 
+// The injected framework DEX must stay unshrunk on CaremeOS ART 8.1; see the release build type.
+// Shared with checkXResourcesIsolation below because that check consumes R8's output and is only
+// meaningful when R8 runs.
+val minifyInjectedFramework = false
+
 android {
     namespace = "org.matrix.vector"
 
@@ -64,7 +69,7 @@ android {
             // wild pointer, and the compiled native stub BLX-es into it. The same sources with an
             // unshrunk DEX boot cleanly. Keep Release native optimization/stripping and the
             // manager/daemon minifiers, but do not run R8 over the framework DEX loaded into ART.
-            isMinifyEnabled = false
+            isMinifyEnabled = minifyInjectedFramework
             proguardFiles("proguard-rules.pro")
         }
     }
@@ -325,6 +330,11 @@ fun originalNames(mapping: File): Map<String, String> =
 
 androidComponents {
     onVariants(selector().withBuildType("release")) { variant ->
+        // No optimiser means no class merging, and there is no minifyReleaseWithR8 output/task to
+        // inspect. Keep this guard coupled to the build-type setting above so re-enabling R8 also
+        // automatically re-enables its isolation regression check.
+        if (!minifyInjectedFramework) return@onVariants
+
         val variantCapped = variant.name.replaceFirstChar { it.uppercase() }
         val dexDir =
             layout.buildDirectory.dir(
