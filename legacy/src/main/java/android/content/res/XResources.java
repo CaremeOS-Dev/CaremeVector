@@ -47,8 +47,6 @@ import de.robv.android.xposed.XposedInit;
 import de.robv.android.xposed.callbacks.XC_LayoutInflated;
 import de.robv.android.xposed.callbacks.XC_LayoutInflated.LayoutInflatedParam;
 import de.robv.android.xposed.callbacks.XCallback;
-import xposed.dummy.XResourcesSuperClass;
-import xposed.dummy.XTypedArraySuperClass;
 
 /**
  * {@link android.content.res.Resources} subclass that allows replacing individual resources.
@@ -56,9 +54,17 @@ import xposed.dummy.XTypedArraySuperClass;
  * <p>Xposed replaces the standard resources with this class, which overrides the methods used for
  * retrieving individual resources and adds possibilities to replace them. These replacements can
  * be set using the methods made available via the API methods in this class.
+ *
+ * <p>CAREME: extends {@link Resources} directly. Upstream subclasses a runtime-generated dummy
+ * superclass, but CaremeOS ART 8.1 resolves a class's static superclass only within that class's
+ * own dex at define-time — never via the rewired ClassLoader parent — so an in-memory/file dummy
+ * superclass makes XResources unloadable. This device provides the stock Resources (verified), and
+ * the callers swap in the real impl via HiddenApiBridge.Resources_setImpl, so direct extension is
+ * both safe and required here. Compiled against libs/android-hidden-27.jar for the hidden
+ * Resources(ClassLoader) constructor.
  */
 @SuppressWarnings("JniMissingFunction")
-public class XResources extends XResourcesSuperClass {
+public class XResources extends Resources {
 	private static final SparseArray<HashMap<String, Object>> sReplacements = new SparseArray<>();
 	private static final SparseArray<HashMap<String, ResourceNames>> sResourceNames = new SparseArray<>();
 
@@ -1300,7 +1306,7 @@ public class XResources extends XResourcesSuperClass {
 	 * Mainly used when inflating layouts.
 	 * @hide
 	 */
-	public static class XTypedArray extends XTypedArraySuperClass {
+	public static class XTypedArray extends TypedArray {
 
         public XTypedArray(Resources resources) {
             super(resources);

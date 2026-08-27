@@ -121,15 +121,12 @@ public final class XposedBridge {
             vdbg("initXResources: makeInheritable x2");
             ResourcesHook.makeInheritable(resClass);
             ResourcesHook.makeInheritable(taClass);
-            ClassLoader myCL = XposedBridge.class.getClassLoader();
-            assert myCL != null;
-            vdbg("initXResources: buildDummyClassLoader");
-            dummyClassLoader = ResourcesHook.buildDummyClassLoader(myCL.getParent(), resClass.getName(), taClass.getName());
-            dummyClassLoader.loadClass("xposed.dummy.XResourcesSuperClass");
-            dummyClassLoader.loadClass("xposed.dummy.XTypedArraySuperClass");
-            vdbg("initXResources: setObjectField parent");
-            XposedHelpers.setObjectField(myCL, "parent", dummyClassLoader);
-            vdbg("initXResources: done");
+            // CAREME: no dummy superclass classloader. XResources extends android.content.res.Resources
+            // directly (see XResources.java); ART's define-time superclass lookup resolves Resources in
+            // the boot classpath, so XResources links with no dummy dex. dummyClassLoader is only a
+            // "did init run" sentinel now.
+            dummyClassLoader = XposedBridge.class.getClassLoader();
+            vdbg("initXResources: done (no dummy loader)");
         } catch (Throwable throwable) {
             vdbg("initXResources threw: " + throwable);
             XposedBridge.log(throwable);
